@@ -8,6 +8,10 @@ import os
 import logging
 from web3 import Web3
 
+# Ensure data directories exist
+for dir in ["data/stock_ticks", "data/crypto_ticks", "data/chainlink_data", "data/news"]:
+    os.makedirs(dir, exist_ok=True)
+
 # Load config from environment variables
 config = {
     "api_keys": {
@@ -27,10 +31,6 @@ config = {
         "contract_address": os.getenv("CONTRACT_ADDRESS")
     }
 }
-
-# Ensure data directories
-for dir in ["data/stock_ticks", "data/crypto_ticks", "data/chainlink_data", "data/news"]:
-    os.makedirs(dir, exist_ok=True)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', filename='app.log')
 logger = logging.getLogger(__name__)
@@ -118,8 +118,8 @@ def fetch_coingecko():
 
 w3 = Web3(Web3.HTTPProvider(config['api_keys']['reactive_rpc']))
 contract_address = config['settings']['contract_address']
-with open("../reactive_contracts/ReactiveTrade.json") as f:
-    abi = json.load(f)['abi']
+# Hardcoded minimal ABI for executeTrade function
+abi = [{"inputs":[{"internalType":"string","name":"symbol","type":"string"},{"internalType":"uint256","name":"price","type":"uint256"}],"name":"executeTrade","outputs":[],"stateMutability":"nonpayable","type":"function"}]
 contract = w3.eth.contract(address=contract_address, abi=abi)
 
 def execute_trade(symbol, price):
