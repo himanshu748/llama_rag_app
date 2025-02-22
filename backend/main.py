@@ -1,129 +1,146 @@
-from fastapi import FastAPI
-import pathway as pw
-from utils import start_fetchers, logger, execute_trade
-from agent import make_decision, answer_query
 import threading
+import websocket
+import json
+import jsonlines
+import requests
 import time
 import os
+import logging
+from web3 import Web3
 
 # Ensure data directories exist
-for dir in ["data/portfolios", "data/news", "data/stock_ticks", "data/crypto_ticks", "data/chainlink_data"]:
+for dir in ["data/stock_ticks", "data/crypto_ticks", "data/chainlink_data", "data/news"]:
     os.makedirs(dir, exist_ok=True)
 
-app = FastAPI()
+# Load config from environment variables
+config = {
+    "api_keys": {
+        "alpha_vantage": os.getenv("ALPHA_VANTAGE_API_KEY"),
+        "newsapi": os.getenv("NEWSAPI_API_KEY"),
+        "huggingface": os.getenv("HUGGINGFACE_API_KEY"),
+        "reactive_rpc": os.getenv("REACTIVE_RPC", "https://ethereum-sepolia-rpc.publicnode.com"),
+        "reactive_private_key": os.getenv("REACTIVE_PRIVATE_KEY")
+    },
+    "settings": {
+        "symbols": {
+            "stocks": os.getenv("SYMBOLS_STOCKS", "RELIANCE.BSE,TCS.BSE").split(","),
+            "crypto": os.getenv("SYMBOLS_CRYPTO", "btcusdt,ethusdt").split(","),
+            "chainlink_pairs": os.getenv("SYMBOLS_CHAINLINK_PAIRS", "ETH/USD").split(",")
+        },
+        "news_polling_interval": int(os.getenv("NEWS_POLLING_INTERVAL", 300)),
+        "contract_address": os.getenv("CONTRACT_ADDRESS")
+    }
+}
 
-# Pathway schemas
-class Tick(pw.Schema):
-    symbol: str
-    price: float
-    timestamp: str
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', filename='app.log')
+logger = logging.getLogger(__name__)
 
-class NewsData(pw.Schema):
-    symbol: str
-    sentiment: float
-    headline: str
-    timestamp: str
-
-class Portfolio(pw.Schema):
-    symbol: str
-    quantity: int
-    price: float
-
-# Data streams
-stock_ticks = pw.io.jsonlines.read("data/stock_ticks/alpha_vantage_ticks.jsonl", schema=Tick, mode="streaming")
-crypto_ticks = pw.io.jsonlines.read("data/crypto_ticks/binance_ticks.jsonl", schema=Tick, mode="streaming")
-coingecko_ticks = pw.io.jsonlines.read("data/crypto_ticks/coingecko_ticks.jsonl", schema=Tick, mode="streaming")
-chainlink_data = pw.io.jsonlines.read("data/chainlink_data/chainlink_ticks.jsonl", schema=Tick, mode="streaming")
-news_data = pw.io.jsonlines.read("data/news/news.jsonl", schema=NewsData, mode="streaming")
-portfolio_table = pw.io.jsonlines.read("data/portfolios/portfolio.jsonl", schema=Portfolio, mode="streaming")
-
-all_ticks = stock_ticks + crypto_ticks + coingecko_ticks + chainlink_data
-
-latest_ticks = all_ticks.groupby(pw.this.symbol).reduce(
-    symbol=pw.this.symbol,
-    price=pw.reducers.latest(pw.this.price),
-    timestamp=pw.reducers.latest(pw.this.timestamp)
-)
-
-latest_news = news_data.groupby(pw.this.symbol).reduce(
-    symbol=pw.this.symbol,
-    sentiment=pw.reducers.mean(pw.this.sentiment),
-    headline=pw.reducers.latest(pw.this.headline),
-    timestamp=pw.reducers.latest(pw.this.timestamp)
-)
-
-enriched_portfolio = portfolio_table.join(
-    latest_ticks, pw.left.symbol == pw.right.symbol, how="left"
-).select(
-    symbol=pw.left.symbol,
-    quantity=pw.left.quantity,
-    purchase_price=pw.left.price,
-    current_price=pw.right.price,
-    tick_timestamp=pw.right.timestamp
-).join(
-    latest_news, pw.left.symbol == pw.right.symbol, how="left"
-).select(
-    symbol=pw.left.symbol,
-    quantity=pw.left.quantity,
-    purchase_price=pw.left.purchase_price,
-    current_price=pw.left.current_price,
-    sentiment=pw.right.sentiment,
-    headline=pw.right.headline,
-    news_timestamp=pw.right.timestamp
-)
-
-def prioritize_data(row):
-    impact_score = row.sentiment if row.sentiment else 0.5
-    if row.current_price and row.purchase_price:
-        price_change = abs(row.current_price - row.purchase_price) / row.purchase_price
-        impact_score += price_change * 10
-    if row.tick_timestamp and (time.time() - int(row.tick_timestamp) < 300):
-        impact_score += 1.0
-    return {"priority": impact_score, "data": row}
-
-indexed_data = enriched_portfolio.map(prioritize_data)
-index = pw.indexing.VectorIndex(
-    indexed_data.data, embedding_fn=pw.embedding.from_sentence_transformers("all-MiniLM-L6-v2"), priority=indexed_data.priority
-)
-
-@app.post("/query")
-async def query_rag(query: dict):
-    try:
-        query_text = query.get("query")
-        context = index.retrieve(query_text, k=5)
-        response = answer_query(query_text, context)
-        logger.info(f"Query: {query_text}, Response: {response}")
-        return {"answer": response}
-    except Exception as e:
-        logger.error(f"Query error: {e}")
-        return {"error": str(e)}
-
-def agent_loop():
+def alpha_vantage_polling():
     while True:
         try:
-            current_state = enriched_portfolio.select().to_dicts()
-            if current_state:
-                final_action, explanations = make_decision(current_state)
-                for decision in explanations:
-                    action = decision['action']
-                    symbol = decision['symbol']
-                    price = decision['price']
-                    explanation = decision['explanation']
-                    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-                    tx_hash = None
-                    if action in ['buy', 'sell']:
-                        tx_hash = execute_trade(symbol, price)
-                    with open('decisions.log', 'a') as f:
-                        f.write(f"{timestamp},{symbol},{action},{explanation},{tx_hash}\n")
+            for symbol in config['settings']['symbols']['stocks']:
+                url = f"https://www.alphavantage.co/query?function=TIME_SERIES_INTRADAY&symbol={symbol}&interval=1min&apikey={config['api_keys']['alpha_vantage']}"
+                response = requests.get(url).json()
+                if "Time Series (1min)" in response:
+                    latest_time = max(response["Time Series (1min)"].keys())
+                    tick = response["Time Series (1min)"][latest_time]
+                    with jsonlines.open("data/stock_ticks/alpha_vantage_ticks.jsonl", "a") as writer:
+                        writer.write({
+                            "symbol": symbol,
+                            "price": float(tick["4. close"]),
+                            "timestamp": latest_time
+                        })
+                    logger.info(f"Alpha Vantage: {symbol} - {tick['4. close']}")
         except Exception as e:
-            logger.error(f"Agent loop error: {e}")
+            logger.error(f"Alpha Vantage error: {e}")
         time.sleep(60)
 
-logger.info("Starting TradeSmart AI Backend...")
-start_fetchers()
-threading.Thread(target=agent_loop, daemon=True).start()
-pw.run()
+def binance_websocket():
+    while True:
+        try:
+            ws = websocket.WebSocket()
+            ws.connect("wss://stream.binance.com:9443/ws")
+            ws.send(json.dumps({"method": "SUBSCRIBE", "params": [f"{s}@ticker" for s in config['settings']['symbols']['crypto']], "id": 1}))
+            while True:
+                tick = json.loads(ws.recv())
+                with jsonlines.open("data/crypto_ticks/binance_ticks.jsonl", "a") as writer:
+                    writer.write({"symbol": tick["s"], "price": float(tick["c"]), "timestamp": tick["E"]})
+                logger.info(f"Binance: {tick['s']} - {tick['c']}")
+        except Exception as e:
+            logger.error(f"Binance error: {e}")
+            time.sleep(5)
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+def fetch_news():
+    while True:
+        try:
+            for symbol in config['settings']['symbols']['stocks'] + config['settings']['symbols']['crypto']:
+                url = f"https://newsapi.org/v2/everything?q={symbol}&apiKey={config['api_keys']['newsapi']}&sortBy=publishedAt"
+                response = requests.get(url).json()
+                articles = response.get('articles', [])
+                if articles:
+                    sentiment = sum(1 for a in articles if 'positive' in a.get('description', '').lower()) / len(articles)
+                    with jsonlines.open("data/news/news.jsonl", "a") as writer:
+                        writer.write({"symbol": symbol, "sentiment": sentiment, "headline": articles[0]['title'], "timestamp": articles[0]['publishedAt']})
+                    logger.info(f"News for {symbol}: {sentiment}")
+        except Exception as e:
+            logger.error(f"NewsAPI error: {e}")
+        time.sleep(config['settings']['news_polling_interval'])
+
+def fetch_chainlink():
+    chainlink_feed = "0x1b44F3514812d835EB1BDB0acB33d3fA3351Ee43"  # ETH/USD on Sepolia
+    w3 = Web3(Web3.HTTPProvider(config['api_keys']['reactive_rpc']))
+    abi = [{"inputs":[],"name":"latestRoundData","outputs":[{"internalType":"uint80","name":"roundId","type":"uint80"},{"internalType":"int256","name":"answer","type":"int256"},{"internalType":"uint256","name":"startedAt","type":"uint256"},{"internalType":"uint256","name":"updatedAt","type":"uint256"},{"internalType":"uint80","name":"answeredInRound","type":"uint80"}],"stateMutability":"view","type":"function"}]
+    contract = w3.eth.contract(address=chainlink_feed, abi=abi)
+    while True:
+        try:
+            data = contract.functions.latestRoundData().call()
+            price = data[1] / 10**8
+            with jsonlines.open("data/chainlink_data/chainlink_ticks.jsonl", "a") as writer:
+                writer.write({"symbol": "ETH/USD", "price": float(price), "timestamp": str(data[3])})
+            logger.info(f"Chainlink: ETH/USD - {price}")
+        except Exception as e:
+            logger.error(f"Chainlink error: {e}")
+        time.sleep(300)
+
+def fetch_coingecko():
+    while True:
+        try:
+            for symbol in config['settings']['symbols']['crypto']:
+                url = f"https://api.coingecko.com/api/v3/simple/price?ids={symbol.split('usdt')[0].lower()}&vs_currencies=usd"
+                response = requests.get(url).json()
+                price = response[symbol.split('usdt')[0].lower()]['usd']
+                with jsonlines.open("data/crypto_ticks/coingecko_ticks.jsonl", "a") as writer:
+                    writer.write({"symbol": symbol, "price": float(price), "timestamp": str(int(time.time()))})
+                logger.info(f"CoinGecko: {symbol} - {price}")
+        except Exception as e:
+            logger.error(f"CoinGecko error: {e}")
+        time.sleep(300)
+
+w3 = Web3(Web3.HTTPProvider(config['api_keys']['reactive_rpc']))
+contract_address = config['settings']['contract_address']
+abi = [{"inputs":[{"internalType":"string","name":"symbol","type":"string"},{"internalType":"uint256","name":"price","type":"uint256"}],"name":"executeTrade","outputs":[],"stateMutability":"nonpayable","type":"function"}]
+contract = w3.eth.contract(address=contract_address, abi=abi)
+
+def execute_trade(symbol, price):
+    account = w3.eth.account.from_key(config['api_keys']['reactive_private_key'])
+    try:
+        tx = contract.functions.executeTrade(symbol, int(price)).build_transaction({
+            'from': account.address,
+            'nonce': w3.eth.get_transaction_count(account.address),
+            'gas': 200000,
+            'gasPrice': w3.to_wei('20', 'gwei')
+        })
+        signed_tx = account.sign_transaction(tx)
+        tx_hash = w3.eth.send_raw_transaction(signed_tx.rawTransaction)
+        logger.info(f"Trade: {symbol} at {price}, tx: {tx_hash.hex()}")
+        return tx_hash.hex()
+    except Exception as e:
+        logger.error(f"Trade error: {e}")
+        return None
+
+def start_fetchers():
+    threading.Thread(target=alpha_vantage_polling, daemon=True).start()
+    threading.Thread(target=binance_websocket, daemon=True).start()
+    threading.Thread(target=fetch_news, daemon=True).start()
+    threading.Thread(target=fetch_chainlink, daemon=True).start()
+    threading.Thread(target=fetch_coingecko, daemon=True).start()
