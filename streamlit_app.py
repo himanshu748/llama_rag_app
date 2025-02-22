@@ -5,14 +5,11 @@ import pandas as pd
 import os
 
 # Ensure data directories exist
-os.makedirs("data/portfolios", exist_ok=True)
-os.makedirs("data/news", exist_ok=True)
-os.makedirs("data/stock_ticks", exist_ok=True)
-os.makedirs("data/crypto_ticks", exist_ok=True)
-os.makedirs("data/chainlink_data", exist_ok=True)
+for dir in ["data/portfolios", "data/news", "data/stock_ticks", "data/crypto_ticks", "data/chainlink_data"]:
+    os.makedirs(dir, exist_ok=True)
 
-st.title("Intraday & Crypto RAG Dashboard")
-st.write("Powered by Pathway, Alpha Vantage, Binance, Chainlink, Uniswap, and Reactive Network")
+st.title("TradeSmart AI: Intraday & Crypto Dashboard")
+st.write("Real-time trading insights with AI and blockchain.")
 
 # Portfolio upload
 uploaded_file = st.file_uploader("Upload portfolio CSV (symbol, quantity, price)", type="csv")
@@ -21,41 +18,28 @@ if uploaded_file:
     with jsonlines.open("data/portfolios/portfolio.jsonl", "a") as writer:
         for _, row in df.iterrows():
             writer.write({"symbol": row["symbol"], "quantity": int(row["quantity"]), "price": float(row["price"])})
-    st.success("Portfolio ingested!")
+    st.success("Portfolio uploaded!")
 
 # Live data feed
 st.subheader("Live Data Feed")
-st.write("Real-time updates from Alpha Vantage (stocks), Binance (crypto), Chainlink (oracles), and CoinGecko (Uniswap proxy)")
+st.write("Updates from Alpha Vantage, Binance, Chainlink, and CoinGecko.")
 if st.button("Refresh"):
-    try:
-        with open("data/stock_ticks/alpha_vantage_ticks.jsonl", "r") as f:
-            st.write("Latest Stock Ticks (Alpha Vantage):", [line.strip() for line in f.readlines()[-5:]])
-    except FileNotFoundError:
-        st.write("No stock ticks yet.")
-    try:
-        with open("data/crypto_ticks/binance_ticks.jsonl", "r") as f:
-            st.write("Latest Crypto Ticks (Binance):", [line.strip() for line in f.readlines()[-5:]])
-    except FileNotFoundError:
-        st.write("No Binance ticks yet.")
-    try:
-        with open("data/crypto_ticks/coingecko_ticks.jsonl", "r") as f:
-            st.write("Latest Uniswap Ticks (CoinGecko):", [line.strip() for line in f.readlines()[-5:]])
-    except FileNotFoundError:
-        st.write("No CoinGecko ticks yet.")
-    try:
-        with open("data/chainlink_data/chainlink_ticks.jsonl", "r") as f:
-            st.write("Latest Chainlink Feeds:", [line.strip() for line in f.readlines()[-5:]])
-    except FileNotFoundError:
-        st.write("No Chainlink data yet.")
-    try:
-        with open("data/news/news.jsonl", "r") as f:
-            st.write("Latest News:", [line.strip() for line in f.readlines()[-5:]])
-    except FileNotFoundError:
-        st.write("No news yet.")
+    for file, label in [
+        ("data/stock_ticks/alpha_vantage_ticks.jsonl", "Stock Ticks (Alpha Vantage)"),
+        ("data/crypto_ticks/binance_ticks.jsonl", "Crypto Ticks (Binance)"),
+        ("data/crypto_ticks/coingecko_ticks.jsonl", "Uniswap Ticks (CoinGecko)"),
+        ("data/chainlink_data/chainlink_ticks.jsonl", "Chainlink Feeds"),
+        ("data/news/news.jsonl", "News")
+    ]:
+        try:
+            with open(file, "r") as f:
+                st.write(f"Latest {label}:", [line.strip() for line in f.readlines()[-5:]])
+        except FileNotFoundError:
+            st.write(f"No {label.lower()} yet.")
 
 # Agent decisions
-st.subheader("Agentic AI Decisions")
-st.write("Multi-agent system (Conservative, Aggressive, Balanced) with blockchain execution.")
+st.subheader("AI Trading Decisions")
+st.write("Multi-agent system with blockchain execution.")
 try:
     with open("decisions.log", "r") as f:
         decisions = [line.strip().split(',', 4) for line in f.readlines()[-5:]]
@@ -65,16 +49,16 @@ try:
         st.write(f"- Explanation: {explanation}")
         st.write(f"- PHS: {decision[4] if len(decision) > 4 else 'N/A'}")
         if len(decision) > 5 and decision[5]:
-            st.write(f"- [Blockchain Transaction](https://sepolia.etherscan.io/tx/{decision[5]})")
+            st.write(f"- [Transaction](https://sepolia.etherscan.io/tx/{decision[5]})")
 except FileNotFoundError:
     st.write("No decisions yet.")
 
 # Query interface
-st.subheader("Ask the Agent")
-query = st.text_input("Enter your question (e.g., 'Should I sell TCS.BSE?')")
+st.subheader("Ask TradeSmart AI")
+query = st.text_input("E.g., 'Should I sell TCS.BSE?'")
 if query:
-    # Replace with your Render backend URL after deployment
-    render_url = "https://your-app.onrender.com/query"  # Placeholder
+    # Replace with your Render URL post-deployment
+    render_url = "https://your-app.onrender.com/query"
     response = requests.post(render_url, json={"query": query})
     st.write(f"Answer: {response.json().get('answer', 'Error occurred')}")
-st.sidebar.write("Status: Running with real-time data sync")
+st.sidebar.write("Status: Real-time trading active")
