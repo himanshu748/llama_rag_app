@@ -2,7 +2,7 @@ import requests
 from utils import logger, config, execute_trade
 
 def query_llama(prompt):
-    headers = {"Authorization": f"Bearer {config['api_keys']['huggingface']}"}
+    headers = {"Authorization": f"Bearer {config['api_keys']['Groq']}"}
     payload = {"inputs": prompt, "parameters": {"max_length": 200}}
     response = requests.post("https://api-inference.huggingface.co/models/meta-llama/Llama-3.3-70B-Instruct", headers=headers, json=payload)
     return response.json()[0]["generated_text"]
